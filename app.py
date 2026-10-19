@@ -2,30 +2,27 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# -------------------------- Page Configuration --------------------------
+# -------------------------- Page Setup --------------------------
 st.set_page_config(page_title="WDW Operations Dashboard", layout="wide")
 
-# Fix matplotlib rendering compatibility
+# Fix matplotlib rendering
 plt.rcParams["axes.unicode_minus"] = False
 
-# Dashboard header
+# Dashboard identity (assignment requirement: team name + one-line purpose)
 st.title("Walt Disney World Operations Dashboard | Team Group 2")
-st.caption("For Park Operations Managers | Data-driven staffing, crowd diversion and ride scheduling decisions")
+st.caption("For Park Operations Managers | Supports staffing adjustment, crowd diversion and ride scheduling decisions")
 
-# -------------------------- Data Loading & Enrichment --------------------------
+# -------------------------- Data Loader --------------------------
 @st.cache_data(show_spinner=False)
-def load_and_enrich_data():
-    """Load crowd calendar data and derive operational fields for decision support"""
+def load_data():
     df = pd.read_csv("calendar_enriched.csv")
-    
-    # Standardize date format
     df["date"] = pd.to_datetime(df["date"])
     
     # Operational flags
     df["is_high_crowd"] = df["crowd_level_pct"] > 70
     df["is_critical_crowd"] = df["crowd_level_pct"] > 85
     
-    # Categorize day type for filtering
+    # Day type classification
     def get_day_type(row):
         if row["is_holiday"]:
             return "Holiday"
@@ -35,22 +32,19 @@ def load_and_enrich_data():
             return "Weekend"
         else:
             return "Regular Day"
-    
     df["day_type"] = df.apply(get_day_type, axis=1)
     
-    date_min = df["date"].min()
-    date_max = df["date"].max()
-    
-    return df, date_min, date_max
+    return df
 
-# Load dataset
-df, date_min, date_max = load_and_enrich_data()
+df = load_data()
+date_min = df["date"].min()
+date_max = df["date"].max()
 
 # -------------------------- Sidebar Filters --------------------------
 with st.sidebar:
     st.header("Filters")
     
-    # 1. Date range selector
+    # 1. Date range
     date_range = st.date_input(
         "Select date range",
         value=(date_min, date_max),
@@ -69,7 +63,7 @@ with st.sidebar:
     selected_day_type = st.selectbox("Filter by day type", day_type_options)
 
 # -------------------------- Data Filtering --------------------------
-# Base filter: date range + selected park
+# Base filter
 filtered = df[
     (df["date"] >= start_dt) &
     (df["date"] <= end_dt) &
@@ -84,86 +78,84 @@ elif selected_day_type == "Holiday only":
 elif selected_day_type == "Special event only":
     filtered = filtered[filtered["has_special_event"] == True]
 
-# Calculate prior period values for week-over-week comparison
+# Aggregate to daily level for trend and period comparison
+daily = filtered.groupby("date")["crowd_level_pct"].mean().reset_index()
+n_days = len(daily)
+
+# Calculate prior equivalent period (robust, handles missing days gracefully)
 prev_end = start_dt - pd.Timedelta(days=1)
-prev_start = prev_end - pd.Timedelta(days=len(filtered)-1)
-prev_filtered = df[
+prev_start = start_dt - pd.Timedelta(days=n_days)
+prev_daily = df[
     (df["date"] >= prev_start) &
     (df["date"] <= prev_end) &
     (df["park_name"] == selected_park)
-]
+].groupby("date")["crowd_level_pct"].mean().reset_index()
 
-# -------------------------- Core Operational KPIs --------------------------
+# -------------------------- Core KPIs (max 3, per assignment rule) --------------------------
 st.subheader("Key Operational Metrics")
 col1, col2, col3 = st.columns(3)
 
-# KPI 1: Average crowd level + WoW change
-avg_crowd = filtered["crowd_level_pct"].mean()
-prev_avg_crowd = prev_filtered["crowd_level_pct"].mean()
-crowd_delta = avg_crowd - prev_avg_crowd
+# KPI 1: Average crowd level + period-over-period delta
+avg_crowd = daily["crowd_level_pct"].mean()
+if len(prev_daily) > 0:
+    prev_avg = prev_daily["crowd_level_pct"].mean()
+    crowd_delta = avg_crowd - prev_avg
+    delta_text = f"{crowd_delta:+.1f} pp vs. prior period"
+else:
+    delta_text = "N/A (no prior data)"
 
 with col1:
     st.metric(
         label="Average Crowd Level",
         value=f"{avg_crowd:.1f}%",
-        delta=f"{crowd_delta:+.1f} pp vs. prior period",
+        delta=delta_text,
         delta_color="inverse"
     )
 
-# KPI 2: High-crowd day count + WoW change
-high_crowd_count = int(filtered["is_high_crowd"].sum())
-prev_high_count = int(prev_filtered["is_high_crowd"].sum())
-high_crowd_delta = high_crowd_count - prev_high_count
-
+# KPI 2: High-crowd day share
+high_share = (filtered["is_high_crowd"].mean()) * 100
 with col2:
     st.metric(
-        label="High Crowd Days (>70%)",
-        value=high_crowd_count,
-        delta=f"{high_crowd_delta:+d} vs. prior period",
-        delta_color="inverse"
+        label="High Crowd Share (>70%)",
+        value=f"{high_share:.1f}%",
+        help="Share of days above the operational alert threshold"
     )
 
 # KPI 3: Average operating hours
 avg_op_hours = (filtered["operating_minutes"].mean()) / 60
-prev_op_hours = (prev_filtered["operating_minutes"].mean()) / 60
-op_hours_delta = avg_op_hours - prev_op_hours
-
 with col3:
     st.metric(
         label="Avg Operating Hours",
-        value=f"{avg_op_hours:.1f}h",
-        delta=f"{op_hours_delta:+.1f}h vs. prior period"
+        value=f"{avg_op_hours:.1f}h"
     )
 
-# -------------------------- Operational Recommendations --------------------------
-st.subheader("Operational Recommendations")
+# -------------------------- Operational Recommendation (assignment: if X then Y) --------------------------
+st.subheader("Operational Recommendation")
 
 if avg_crowd < 55:
-    st.success("**Crowd level: Low** | Standard staffing levels are sufficient. No diversion measures needed.")
+    st.success("**Crowd level: Low** — Standard staffing is sufficient. No diversion measures required.")
 elif avg_crowd < 70:
-    st.info("**Crowd level: Moderate** | Add 10-15% roving staff to high-traffic areas. Monitor queue trends at top attractions.")
+    st.info("**Crowd level: Moderate** — Add 10–15% roving staff to high-traffic zones. Monitor queue times at top attractions.")
 elif avg_crowd < 85:
-    st.warning("**Crowd level: High** | Activate crowd diversion plan. Add extra FastPass distribution points and adjust parade times to spread foot traffic.")
+    st.warning("**Crowd level: High** — Activate the standard crowd diversion plan. Add extra FastPass distribution points and adjust parade timing to spread foot traffic.")
 else:
-    st.error("**Crowd level: Critical** | Emergency staffing boost required. Implement maximum diversion protocols and extend operating hours if possible.")
+    st.error("**Crowd level: Critical** — Call in emergency staffing. Activate maximum diversion protocols and extend operating hours if feasible.")
 
-# -------------------------- Supporting Charts --------------------------
+# -------------------------- Supporting Charts (1–2, per assignment rule) --------------------------
 st.subheader("Crowd Pattern Analysis")
 
-# Chart 1: Daily crowd level trend with alert thresholds
-daily_crowd = filtered.groupby("date")["crowd_level_pct"].mean().reset_index()
-
+# Chart 1: Daily trend with action thresholds
 fig1, ax1 = plt.subplots(figsize=(10, 3.5))
-ax1.plot(daily_crowd["date"], daily_crowd["crowd_level_pct"], color="#003366", linewidth=2)
+ax1.plot(daily["date"], daily["crowd_level_pct"], color="#003366", linewidth=2)
 ax1.axhline(y=70, color="#c82423", linestyle="--", label="70% High Alert")
 ax1.axhline(y=85, color="#8b0000", linestyle=":", label="85% Critical Threshold")
 ax1.set_ylabel("Crowd Level (%)")
-ax1.set_title(f"Daily Crowd Trend - {selected_park}")
+ax1.set_title(f"Daily Crowd Trend — {selected_park}")
 ax1.legend(loc="upper left")
 ax1.grid(alpha=0.3)
 st.pyplot(fig1)
 
-# Chart 2: Crowd level by day of week
+# Chart 2: Day-of-week pattern
 dow_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 dow_crowd = filtered.groupby("day_of_week")["crowd_level_pct"].mean().reindex(dow_order)
 
@@ -176,23 +168,27 @@ ax2.bar_label(bars, fmt="%.1f%%", padding=3)
 ax2.legend()
 st.pyplot(fig2)
 
-# -------------------------- Data Notes & Refresh Plan --------------------------
+# -------------------------- Data Notes (Step 3 & Step 4 requirements) --------------------------
 with st.expander("Data Notes & Production Refresh Plan"):
     st.markdown("""
-    **Data Source**: Kaggle - Walt Disney World Wait Times and Crowd Calendar  
+    **Data Source**: Kaggle — Walt Disney World Wait Times and Crowd Calendar  
     **Coverage**: All 4 WDW theme parks, daily records from 2015 to 2026
 
-    **Production Refresh Schedule**:
-    - Park-level crowd data: refreshed every 1 hour during operating hours
-    - Holiday and event calendar: updated weekly, every Monday
-    - Ride-level wait times: refreshed every 15 minutes for on-site teams
+    **What we removed, and why**:
+    - Ride-level wait times: removed. Operations managers making staffing decisions do not need per-ride data at the top level. Granular ride data is for on-site team leads, not central operations.
+    - Weather fields: removed. Weather correlates with crowd but does not directly drive staffing decisions. Adding it would add visual noise without improving operational decisions.
 
-    **Action Trigger**:
+    **Production Refresh Schedule**:
+    - Park-level crowd data: refreshed every 1 hour during operating hours. This matches the staffing decision cycle; real-time refresh would add cost without changing decisions.
+    - Holiday and event calendar: updated weekly, every Monday.
+    - Ride-level wait times: refreshed every 15 minutes for on-site teams (separate dashboard).
+
+    **Action Triggers**:
     - Crowd level above 70%: activate standard crowd diversion plan
     - Crowd level above 85%: trigger emergency staffing and protocol escalation
 
     **Limitations**:
-    - Crowd level is an estimated occupancy rate, not exact visitor headcount
+    - Crowd level is an estimated occupancy rate, not an exact visitor headcount
     - Temporary ride closures and extreme weather events are not fully reflected in this dataset
     - This is a historical snapshot dataset; production deployment would connect to live park systems
     """)
